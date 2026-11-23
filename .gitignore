@@ -1,0 +1,22 @@
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Local learner records and database state
+*.db
+*.sqlite
+*.sqlite3
+data/*.csv
+
+# Python-generated files and environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Local editor/build outputs
+.codex/
+poster_build_private/

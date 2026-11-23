@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { color-scheme: light; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: #172033; background: transparent; }
+    .control {
+      display: flex; align-items: center; justify-content: space-between; gap: 18px;
+      min-height: 88px; padding: 14px 18px; border: 1px solid #dfe3ee;
+      border-radius: 16px; background: #fff; box-shadow: 0 4px 16px rgba(16,24,40,.05);
+    }
+    .left { min-width: 0; display: flex; align-items: center; gap: 13px; }
+    .mark { width: 42px; height: 42px; flex: 0 0 42px; display: grid; place-items: center;
+      border-radius: 13px; color: #4338ca; background: #eeedff; font-size: 20px; }
+    .copy { min-width: 0; }
+    .headline { font-size: 14px; font-weight: 750; letter-spacing: -.01em; }
+    .subline { margin-top: 4px; color: #667085; font-size: 12px; line-height: 1.4; }
+    .right { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; }
+    .timer-wrap { min-width: 105px; text-align: right; }
+    .timer-label { color: #667085; font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+    .timer { margin-top: 2px; color: #172033; font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .timer.urgent { color: #dc2626; }
+    .warnings { color: #4b5565; font-size: 11px; text-align: right; white-space: nowrap; }
+    button { min-height: 40px; padding: 0 15px; border: 0; border-radius: 10px;
+      color: #fff; background: linear-gradient(135deg, #5b54ee, #4338ca);
+      font-size: 12px; font-weight: 750; cursor: pointer; }
+    button:hover { background: #3730a3; }
+    button.secondary { color: #3730a3; background: #eeedff; }
+    .message { display: none; margin-top: 7px; color: #b42318; font-size: 11px; }
+    @media (max-width: 620px) {
+      .control { align-items: flex-start; flex-direction: column; gap: 11px; }
+      .right { width: 100%; justify-content: space-between; }
+      .warnings { text-align: left; white-space: normal; }
+      .timer-wrap { text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <section class="control" aria-live="polite">
+    <div class="left">
+      <div class="mark" aria-hidden="true">⏱</div>
+      <div class="copy">
+        <div class="headline" id="headline">Timed exam ready</div>
+        <div class="subline" id="subline">Start to enter fullscreen. Your 30-minute clock begins after fullscreen opens.</div>
+        <div class="message" id="message" role="status"></div>
+      </div>
+    </div>
+    <div class="right">
+      <div class="timer-wrap" id="timerWrap" hidden>
+        <div class="timer-label">Time remaining</div>
+        <div class="timer" id="timer">30:00</div>
+      </div>
+      <div class="warnings" id="warnings" hidden>0 / 2 warnings</div>
+      <button id="actionButton" type="button">Start fullscreen exam</button>
+    </div>
+  </section>
+  <script>
+    const headline = document.getElementById("headline");
+    const subline = document.getElementById("subline");
+    const timerWrap = document.getElementById("timerWrap");
+    const timerElement = document.getElementById("timer");
+    const warningsElement = document.getElementById("warnings");
+    const actionButton = document.getElementById("actionButton");
+    const message = document.getElementById("message");
+
+    let currentArgs = {};
+    let isActive = false;
+    let deadlineMs = 0;
+    let clockOffsetMs = 0;
+    let lastStrikeAt = 0;
+    let expirySent = false;
+
+    function hostDocument() {
+      try { return window.parent.document; } catch (error) { return null; }
+    }
+
+    function hostIsFullscreen() {
+      const doc = hostDocument();
+      return !!(doc && (doc.fullscreenElement || doc.webkitFullscreenElement));
+    }
+
+    function sendValue(type, reason) {
+      const value = {
+        type: type,
+        reason: reason || "",
+        event_id: Date.now().toString(36) + "-" + Math.random().toString(36).slice(2)
+      };
+      window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: "streamlit:setComponentValue",
+        value: value,
+        dataType: "json"
+      }, "*");
+    }
+
+    function setFrameHeight() {
+      window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: "streamlit:setFrameHeight",
+        height: document.body.scrollHeight
+      }, "*");
+    }
+
+    function showMessage(text) {
+      message.textContent = text;
+      message.style.display = text ? "block" : "none";
+    }
+
+    async function requestHostFullscreen() {
+      const doc = hostDocument();
+      const root = doc && doc.documentElement;
+      if (!root || !root.requestFullscreen) {
+        showMessage("Fullscreen is unavailable in this browser. Allow fullscreen for this app and try again.");
+        return false;
+      }
+      try {
+        await root.requestFullscreen({ navigationUI: "hide" });
+        showMessage("");
+        return true;
+      } catch (error) {
+        showMessage("Fullscreen was not enabled. Click the button again and allow fullscreen.");
+        return false;
+      }
+    }
+
+    function requestStrike(reason) {
+      if (!isActive) return;
+      const now = Date.now();
+      if (now - lastStrikeAt < 1600) return;
+      lastStrikeAt = now;
+      showMessage(reason === "tab_switch"
+        ? "Tab switch detected. Return to the exam and continue."
+        : "Fullscreen exited. Click Resume fullscreen to continue.");
+      sendValue("strike", reason);
+    }
+
+    function render(args) {
+      const wasActive = isActive;
+      currentArgs = args || {};
+      isActive = !!currentArgs.active;
+      deadlineMs = Number(currentArgs.deadline_ms || 0);
+      clockOffsetMs = Number(currentArgs.server_now_ms || Date.now()) - Date.now();
+
+      if (deadlineMs === 0) expirySent = false;
+      if (wasActive && !isActive && hostIsFullscreen()) {
+        const doc = hostDocument();
+        if (doc && doc.exitFullscreen) doc.exitFullscreen().catch(function () {});
+      }
+
+      if (isActive) {
+        headline.textContent = "Exam in progress";
+        subline.textContent = "Stay in this tab and fullscreen. The third focus/fullscreen violation submits your answers.";
+        timerWrap.hidden = false;
+        warningsElement.hidden = false;
+        warningsElement.textContent = String(currentArgs.switch_count || 0) + " / " +
+          String(currentArgs.allowed_switches || 2) + " warnings used";
+        actionButton.textContent = hostIsFullscreen() ? "Fullscreen active" : "Resume fullscreen";
+        actionButton.className = hostIsFullscreen() ? "secondary" : "";
+        actionButton.disabled = hostIsFullscreen();
+        showMessage(hostIsFullscreen() ? "" : "Fullscreen exited. Return to fullscreen to continue.");
+      } else {
+        headline.textContent = "Timed exam ready";
+        subline.textContent = "Start to enter fullscreen. Your 30-minute clock begins after fullscreen opens.";
+        timerWrap.hidden = true;
+        warningsElement.hidden = true;
+        actionButton.textContent = "Start fullscreen exam";
+        actionButton.className = "";
+        actionButton.disabled = false;
+        showMessage("");
+      }
+      tick();
+      setFrameHeight();
+    }
+
+    function tick() {
+      if (!isActive || !deadlineMs) return;
+      const remaining = Math.max(0, Math.ceil((deadlineMs - (Date.now() + clockOffsetMs)) / 1000));
+      const minutes = String(Math.floor(remaining / 60)).padStart(2, "0");
+      const seconds = String(remaining % 60).padStart(2, "0");
+      timerElement.textContent = minutes + ":" + seconds;
+      timerElement.classList.toggle("urgent", remaining <= 300);
+      if (remaining === 0 && !expirySent) {
+        expirySent = true;
+        sendValue("time_expired", "time_limit");
+      }
+    }
+
+    actionButton.addEventListener("click", async function () {
+      showMessage("");
+      if (!isActive) {
+        if (await requestHostFullscreen()) sendValue("start", "started");
+        return;
+      }
+      if (!hostIsFullscreen()) {
+        await requestHostFullscreen();
+        actionButton.textContent = hostIsFullscreen() ? "Fullscreen active" : "Resume fullscreen";
+        actionButton.disabled = hostIsFullscreen();
+        actionButton.className = hostIsFullscreen() ? "secondary" : "";
+      }
+    });
+
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) requestStrike("tab_switch");
+    });
+
+    const host = hostDocument();
+    if (host) {
+      host.addEventListener("fullscreenchange", function () {
+        if (isActive && !hostIsFullscreen()) requestStrike("fullscreen_exit");
+        if (isActive && hostIsFullscreen()) {
+          actionButton.textContent = "Fullscreen active";
+          actionButton.disabled = true;
+          actionButton.className = "secondary";
+          showMessage("");
+        }
+      });
+      host.addEventListener("webkitfullscreenchange", function () {
+        if (isActive && !hostIsFullscreen()) requestStrike("fullscreen_exit");
+      });
+    }
+
+    window.addEventListener("message", function (event) {
+      const data = event.data;
+      if (!data || data.type !== "streamlit:render") return;
+      render(data.args);
+    });
+
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: "streamlit:componentReady",
+      apiVersion: 1
+    }, "*");
+    setInterval(tick, 250);
+  </script>
+</body>
+</html>
